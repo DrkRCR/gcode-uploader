@@ -1,0 +1,5 @@
+{
+  "appId": "com.infinitylayers.gcodeuploader",
+  "appName": "GCODE Uploader",
+  "webDir": "dist"
+}
