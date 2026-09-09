@@ -50,9 +50,58 @@ export function usePrinter() {
     if (commandQueueRef.current.length > 0) {
       const cmd = commandQueueRef.current.shift();
       isWaitingForOkRef.current = true;
-      addLog(`> ${cmd}`);
+      if (!cmd.startsWith('M105')) addLog(`> ${cmd}`);
       await connectionRef.current.write(cmd);
-    } else if (isPrintingRef.current) {
+      return;
+    } 
+    
+    if (isPrintingRef.current) {
+      while (printIndexRef.current < gcodeLinesRef.current.length) {
+        let cmd = gcodeLinesRef.current[printIndexRef.current].trim();
+        printIndexRef.current++;
+        
+        // Strip inline comments
+        if (cmd.includes(';')) {
+          cmd = cmd.split(';')[0].trim();
+        }
+        
+        // Skip empty lines or pure comments synchronously
+        if (!cmd) {
+          continue;
+        }
+
+        // Throttle React state updates (UI) to every 100 lines to save power
+        if (printIndexRef.current % 100 === 0) {
+          setPrintProgress((printIndexRef.current / gcodeLinesRef.current.length) * 100);
+          
+          if (printStartTimeRef.current) {
+            let msRemaining = 0;
+            if (totalPrintSecondsRef.current) {
+              const progressRatio = printIndexRef.current / gcodeLinesRef.current.length;
+              msRemaining = (totalPrintSecondsRef.current * 1000) * (1 - progressRatio);
+            } else {
+              const elapsed = Date.now() - printStartTimeRef.current;
+              const msPerLine = elapsed / printIndexRef.current;
+              const linesRemaining = gcodeLinesRef.current.length - printIndexRef.current;
+              msRemaining = msPerLine * linesRemaining;
+            }
+
+            if (msRemaining > 0 && msRemaining < 86400000) { 
+              const h = Math.floor(msRemaining / 3600000);
+              const m = Math.floor((msRemaining % 3600000) / 60000);
+              const s = Math.floor((msRemaining % 60000) / 1000);
+              setLiveEta(h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`);
+            }
+          }
+        }
+        
+        isWaitingForOkRef.current = true;
+        // Don't add log for every line of file to save CPU
+        await connectionRef.current.write(cmd);
+        return;
+      }
+
+      // If loop finishes, print is complete
       if (printIndexRef.current >= gcodeLinesRef.current.length) {
         addLog(`--- Copy ${completedCopiesRef.current + 1} Complete ---`);
         
@@ -77,47 +126,15 @@ export function usePrinter() {
         setTotalCopies(1);
         setCompletedCopies(0);
         setIsWaitingForClear(false);
-        return;
       }
-
-      let cmd = gcodeLinesRef.current[printIndexRef.current].trim();
-      printIndexRef.current++;
-      
-      // Update progress periodically or on completion
-      setPrintProgress((printIndexRef.current / gcodeLinesRef.current.length) * 100);
-      
-      if (printIndexRef.current % 10 === 0 && printStartTimeRef.current) {
-        const elapsed = Date.now() - printStartTimeRef.current;
-        const msPerLine = elapsed / printIndexRef.current;
-        const linesRemaining = gcodeLinesRef.current.length - printIndexRef.current;
-        const msRemaining = msPerLine * linesRemaining;
-        if (msRemaining > 0 && msRemaining < 86400000) { // sanity check < 24h
-          const h = Math.floor(msRemaining / 3600000);
-          const m = Math.floor((msRemaining % 3600000) / 60000);
-          const s = Math.floor((msRemaining % 60000) / 1000);
-          setLiveEta(h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`);
-        }
-      }
-      
-      // Skip empty lines or pure comments, but we still need to process next
-      if (!cmd || cmd.startsWith(';')) {
-        setTimeout(processQueue, 0);
-        return;
-      }
-      
-      // Strip inline comments
-      if (cmd.includes(';')) {
-        cmd = cmd.split(';')[0].trim();
-      }
-      
-      isWaitingForOkRef.current = true;
-      addLog(`> ${cmd}`);
-      await connectionRef.current.write(cmd);
     }
   }, [addLog, setIsPrinting]);
 
   const handleData = useCallback((line) => {
-    addLog(`< ${line}`);
+    // Only log if not just an 'ok' or temperature report, to prevent React from thrashing
+    if (!line.startsWith('ok') && !line.startsWith('T:')) {
+      addLog(`< ${line}`);
+    }
     
     // Parse temperatures: ok T:200.0 /200.0 B:60.0 /60.0 @:127 B@:127
     if (line.includes('T:')) {
@@ -176,17 +193,21 @@ export function usePrinter() {
     }
   };
 
-  const startPrint = (gcodeString, copies = 1) => {
+  // For ETA
+  const totalPrintSecondsRef = useRef(null);
+
+  const startPrint = (gcodeString, copies = 1, estimatedTimeSeconds = null) => {
     const lines = gcodeString.split('\n');
     gcodeLinesRef.current = lines;
     printIndexRef.current = 0;
     printStartTimeRef.current = Date.now();
     totalCopiesRef.current = copies;
     completedCopiesRef.current = 0;
+    totalPrintSecondsRef.current = estimatedTimeSeconds;
     setTotalCopies(copies);
     setCompletedCopies(0);
     setIsWaitingForClear(false);
-    setLiveEta("Calculating...");
+    setLiveEta(estimatedTimeSeconds ? "Calculating..." : "Calculating (Naive)...");
     setIsPrinting(true);
     setPrintProgress(0);
     // Kickoff process queue
@@ -235,6 +256,24 @@ export function usePrinter() {
     setIsWaitingForClear(false);
   };
 
+  const [elapsedTimeStr, setElapsedTimeStr] = useState(null);
+
+  useEffect(() => {
+    let interval;
+    if (isPrintingState && printStartTimeRef.current) {
+      interval = setInterval(() => {
+        const elapsed = Date.now() - printStartTimeRef.current;
+        const h = Math.floor(elapsed / 3600000);
+        const m = Math.floor((elapsed % 3600000) / 60000);
+        const s = Math.floor((elapsed % 60000) / 1000);
+        setElapsedTimeStr(h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`);
+      }, 1000);
+    } else if (!isPrintingState && printProgress === 0) {
+      setElapsedTimeStr(null);
+    }
+    return () => clearInterval(interval);
+  }, [isPrintingState, printProgress]);
+
   return {
     isConnected,
     hotendTemp,
@@ -247,6 +286,7 @@ export function usePrinter() {
     estimatedTime,
     setEstimatedTime,
     liveEta,
+    elapsedTime: elapsedTimeStr,
     connect,
     disconnect,
     sendCommand,

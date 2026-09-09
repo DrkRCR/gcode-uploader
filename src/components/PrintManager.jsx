@@ -5,7 +5,7 @@ import { getProfileById } from '../lib/printers';
 
 export default function PrintManager({ 
   isPrinting, printProgress, startPrint, pausePrint, resumePrint, stopPrint, 
-  activeProfileId, setActiveProfileId, liveEta, 
+  activeProfileId, setActiveProfileId, liveEta, elapsedTime,
   totalCopies, completedCopies, isWaitingForClear, continueNextCopy 
 }) {
   const [file, setFile] = useState(null);
@@ -57,7 +57,7 @@ export default function PrintManager({
   const handleStart = () => {
     setShowPreflight(false);
     if (gcodeContent) {
-      startPrint(gcodeContent, copies);
+      startPrint(gcodeContent, copies, analysis?.estimatedTimeSeconds);
     }
   };
   
@@ -143,8 +143,15 @@ export default function PrintManager({
             <span className="file-name">{file?.name}</span>
           </div>
           
-          <div className="eta-display" style={{display:'flex', alignItems:'center', gap:'0.5rem', margin:'0.5rem 0', color:'var(--accent-blue)'}}>
-            <Clock size={16}/> <span>ETA: {liveEta || '...'}</span>
+          <div className="eta-display" style={{display:'flex', alignItems:'center', justifyContent: 'space-between', margin:'0.5rem 0', color:'var(--accent-blue)'}}>
+            <div style={{display:'flex', alignItems:'center', gap:'0.5rem'}}>
+              <Clock size={16}/> <span>ETA: {liveEta || '...'}</span>
+            </div>
+            {elapsedTime && (
+              <div style={{display:'flex', alignItems:'center', gap:'0.5rem', opacity: 0.8}}>
+                <span>Elapsed: {elapsedTime}</span>
+              </div>
+            )}
           </div>
           
           <div className="print-controls">

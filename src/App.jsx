@@ -129,6 +129,7 @@ function App() {
               activeProfileId={printer.activeProfileId}
               setActiveProfileId={printer.setActiveProfileId}
               liveEta={printer.liveEta}
+              elapsedTime={printer.elapsedTime}
               totalCopies={printer.totalCopies}
               completedCopies={printer.completedCopies}
               isWaitingForClear={printer.isWaitingForClear}

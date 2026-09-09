@@ -2,6 +2,7 @@ export function analyzeGcode(gcodeString) {
   let maxX = 0, maxY = 0, maxZ = 0;
   let maxHotend = 0, maxBed = 0;
   let estimatedTimeStr = null;
+  let estimatedTimeSeconds = null;
   let autoDetectedProfileId = null;
 
   const lines = gcodeString.split('\n');
@@ -18,11 +19,23 @@ export function analyzeGcode(gcodeString) {
       // ETA detection
       if (lowerLine.includes('estimated printing time')) {
         const timeMatch = line.match(/estimated printing time(?:\s*\(.*?\))?\s*=\s*(.*)/i);
-        if (timeMatch) estimatedTimeStr = timeMatch[1].trim();
+        if (timeMatch) {
+          estimatedTimeStr = timeMatch[1].trim();
+          // Parse "1h 2m 3s" or "30m 10s" into seconds
+          let totalSecs = 0;
+          const hMatch = estimatedTimeStr.match(/(\d+)h/i);
+          if (hMatch) totalSecs += parseInt(hMatch[1]) * 3600;
+          const mMatch = estimatedTimeStr.match(/(\d+)m/i);
+          if (mMatch) totalSecs += parseInt(mMatch[1]) * 60;
+          const sMatch = estimatedTimeStr.match(/(\d+)s/i);
+          if (sMatch) totalSecs += parseInt(sMatch[1]);
+          if (totalSecs > 0) estimatedTimeSeconds = totalSecs;
+        }
       } else if (line.startsWith(';TIME:')) {
         // Cura time in seconds
         const seconds = parseInt(line.substring(6));
         if (!isNaN(seconds)) {
+          estimatedTimeSeconds = seconds;
           const h = Math.floor(seconds / 3600);
           const m = Math.floor((seconds % 3600) / 60);
           estimatedTimeStr = h > 0 ? `${h}h ${m}m` : `${m}m`;
@@ -84,6 +97,7 @@ export function analyzeGcode(gcodeString) {
     bounds: { x: maxX, y: maxY, z: maxZ },
     temps: { hotend: maxHotend, bed: maxBed },
     estimatedTime: estimatedTimeStr,
+    estimatedTimeSeconds: estimatedTimeSeconds,
     suggestedProfile: autoDetectedProfileId
   };
 }
