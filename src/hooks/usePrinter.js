@@ -3,6 +3,13 @@ import { PrinterConnection } from '../lib/serial';
 import { getProfileById } from '../lib/printers';
 import { sendPrinterBeep, triggerFilamentChangeAlert, playBrowserTone, playPrinterMelody, playBrowserMelody, MELODIES } from '../lib/beeper';
 import { dispatchPrintNotification } from '../lib/notifications';
+import { 
+  saveRecoverySnapshot, 
+  getRecoveryMeta, 
+  getRecoveryGcode, 
+  clearRecoverySnapshot, 
+  buildRecoveryGcode 
+} from '../lib/recoveryStorage';
 
 export function usePrinter() {
   const [isConnected, setIsConnected] = useState(false);
@@ -40,6 +47,20 @@ export function usePrinter() {
   const beepOnFilamentRef = useRef(true);
   const [soundAlertFilament, setSoundAlertFilament] = useState(true);
   const soundAlertFilamentRef = useRef(true);
+
+  // Smart Park & Anti-Ooze Wipe State
+  const [smartPark, setSmartPark] = useState(true);
+  const smartParkRef = useRef(true);
+  const isParkedRef = useRef(false);
+  const currentXRef = useRef(0);
+  const currentYRef = useRef(0);
+  const currentZRef = useRef(0);
+  const activeFileNameRef = useRef('model.gcode');
+
+  // Interrupted Print Detection ("Save My Print")
+  const [interruptedJob, setInterruptedJob] = useState(() => getRecoveryMeta());
+
+  useEffect(() => { smartParkRef.current = smartPark; }, [smartPark]);
 
   // Selected Song Melody for Filament Changes
   const [selectedMelody, setSelectedMelodyState] = useState(() => {
@@ -120,6 +141,15 @@ export function usePrinter() {
 
         // Check for Filament Change / Pause triggers
         const upperCmd = cmd.toUpperCase();
+        if (upperCmd.startsWith('G0') || upperCmd.startsWith('G1')) {
+          const xMatch = cmd.match(/X([\d.]+)/i);
+          const yMatch = cmd.match(/Y([\d.]+)/i);
+          const zMatch = cmd.match(/Z([\d.]+)/i);
+          if (xMatch) currentXRef.current = parseFloat(xMatch[1]);
+          if (yMatch) currentYRef.current = parseFloat(yMatch[1]);
+          if (zMatch) currentZRef.current = parseFloat(zMatch[1]);
+        }
+
         const isPauseCmd = upperCmd === 'M600' || upperCmd.startsWith('M600 ') ||
                            upperCmd === 'M0' || upperCmd.startsWith('M0 ') ||
                            upperCmd === 'M1' || upperCmd.startsWith('M1 ') ||
@@ -135,7 +165,7 @@ export function usePrinter() {
             description: `Filament change at line ${currentLineIndex + 1}`,
             command: cmd,
             layer: 'N/A',
-            z: 'N/A'
+            z: currentZRef.current > 0 ? currentZRef.current.toFixed(2) : 'N/A'
           };
 
           currentChangeIndexRef.current++;
@@ -145,6 +175,9 @@ export function usePrinter() {
           setIsPrinting(false);
 
           addLog(`[FILAMENT CHANGE] Paused: ${changeInfo.description || cmd}. Swap filament & click Resume.`);
+
+          // Trigger Smart Park (lifts Z 3mm and parks in safe corner)
+          executeSmartPark();
 
           // Trigger Beeper & Audio notification with selected song melody
           if (beepOnFilamentRef.current || soundAlertFilamentRef.current) {
@@ -167,10 +200,23 @@ export function usePrinter() {
           return;
         }
 
-        // Throttle React state updates (UI) to every 100 lines to save power
+        // Throttle React state updates (UI) & Save Crash Recovery Checkpoint
         if (printIndexRef.current % 100 === 0) {
           setPrintProgress((printIndexRef.current / gcodeLinesRef.current.length) * 100);
           setCurrentPrintIndex(printIndexRef.current);
+
+          // Update Crash Recovery metadata checkpoint
+          saveRecoverySnapshot({
+            fileName: activeFileNameRef.current,
+            printIndex: printIndexRef.current,
+            totalLines: gcodeLinesRef.current.length,
+            lastX: currentXRef.current,
+            lastY: currentYRef.current,
+            lastZ: currentZRef.current,
+            hotendTarget,
+            bedTarget,
+            timestamp: Date.now()
+          }, null);
           
           if (printStartTimeRef.current) {
             let msRemaining = 0;
@@ -266,6 +312,34 @@ export function usePrinter() {
     processQueue();
   }, [processQueue]);
 
+  // Smart Park & Anti-Ooze Wipe actions
+  const executeSmartPark = useCallback(() => {
+    if (!smartParkRef.current || isParkedRef.current) return;
+    isParkedRef.current = true;
+    addLog(`> Smart Park: Lifting Z 3mm, anti-ooze retract 2mm, parking at X10 Y10`);
+    commandQueueRef.current.push('G91');
+    commandQueueRef.current.push('G1 E-2 F1800'); // Anti-ooze retract
+    commandQueueRef.current.push('G1 Z3 F1000');  // Safe vertical lift
+    commandQueueRef.current.push('G90');
+    commandQueueRef.current.push('G1 X10 Y10 F4000'); // Safe corner away from model
+    processQueue();
+  }, [addLog, processQueue]);
+
+  const executeSmartResume = useCallback(() => {
+    if (!smartParkRef.current || !isParkedRef.current) return;
+    addLog(`> Smart Resume: Priming and returning to model position`);
+    commandQueueRef.current.push('G91');
+    commandQueueRef.current.push('G1 E2 F1800'); // Micro-prime
+    commandQueueRef.current.push('G90');
+    const targetX = currentXRef.current > 0 ? currentXRef.current : 100;
+    const targetY = currentYRef.current > 0 ? currentYRef.current : 100;
+    const targetZ = currentZRef.current > 0 ? currentZRef.current : 0.2;
+    commandQueueRef.current.push(`G1 X${targetX} Y${targetY} F4000`);
+    commandQueueRef.current.push(`G1 Z${targetZ} F1000`);
+    isParkedRef.current = false;
+    processQueue();
+  }, [addLog, processQueue]);
+
   // Beeper triggers
   const beepPrinter = useCallback((freq = 1000, duration = 200) => {
     sendPrinterBeep(sendCommand, freq, duration);
@@ -321,7 +395,7 @@ export function usePrinter() {
   // For ETA
   const totalPrintSecondsRef = useRef(null);
 
-  const startPrint = (gcodeString, copies = 1, estimatedTimeSeconds = null, detectedChanges = []) => {
+  const startPrint = (gcodeString, copies = 1, estimatedTimeSeconds = null, detectedChanges = [], fileName = 'model.gcode') => {
     const lines = typeof gcodeString === 'string' ? gcodeString.split('\n') : gcodeString;
     gcodeLinesRef.current = lines;
     setActiveGcodeLines(lines);
@@ -338,6 +412,21 @@ export function usePrinter() {
     currentChangeIndexRef.current = 0;
     setIsFilamentChangePause(false);
     setCurrentFilamentChange(null);
+    isParkedRef.current = false;
+
+    // Save initial full G-code payload to IndexedDB for "Save My Print"
+    activeFileNameRef.current = fileName || 'model.gcode';
+    saveRecoverySnapshot({
+      fileName: activeFileNameRef.current,
+      printIndex: 0,
+      totalLines: lines.length,
+      lastX: 0,
+      lastY: 0,
+      lastZ: 0.2,
+      hotendTarget,
+      bedTarget,
+      timestamp: Date.now()
+    }, typeof gcodeString === 'string' ? gcodeString : lines.join('\n'));
 
     setTotalCopies(copies);
     setCompletedCopies(0);
@@ -368,9 +457,11 @@ export function usePrinter() {
 
   const pausePrint = () => {
     setIsPrinting(false);
+    executeSmartPark();
   };
 
   const resumePrint = () => {
+    executeSmartResume();
     setIsPrinting(true);
     setTimeout(() => {
       processQueue();
@@ -382,6 +473,7 @@ export function usePrinter() {
     isFilamentChangePauseRef.current = false;
     setCurrentFilamentChange(null);
     addLog("--- Resuming Print after Filament Change ---");
+    executeSmartResume();
     setIsPrinting(true);
     setTimeout(() => {
       isWaitingForOkRef.current = false;
@@ -420,6 +512,36 @@ export function usePrinter() {
     setIsFilamentChangePause(false);
     setCurrentFilamentChange(null);
     setFilamentChangesList([]);
+    isParkedRef.current = false;
+    clearRecoverySnapshot();
+    setInterruptedJob(null);
+  };
+
+  // "Save My Print" (Crash & Disconnect Recovery) Handlers
+  const resumeInterruptedPrint = async () => {
+    const meta = getRecoveryMeta();
+    if (!meta) return;
+
+    addLog(`--- "Save My Print": Resuming ${meta.fileName} from line ${meta.printIndex} (Z=${meta.lastZ}mm) ---`);
+    const fullGcode = await getRecoveryGcode();
+    if (!fullGcode) {
+      alert("Could not load original G-code from local database. Please load the file manually.");
+      return;
+    }
+
+    const lines = fullGcode.split('\n');
+    const remainingLines = lines.slice(meta.printIndex);
+    const recoveryLines = buildRecoveryGcode(meta, remainingLines);
+
+    clearRecoverySnapshot();
+    setInterruptedJob(null);
+
+    startPrint(recoveryLines.join('\n'), 1, null, [], `Resumed_${meta.fileName}`);
+  };
+
+  const discardInterruptedPrint = () => {
+    clearRecoverySnapshot();
+    setInterruptedJob(null);
   };
 
   const [elapsedTimeStr, setElapsedTimeStr] = useState(null);
@@ -489,6 +611,13 @@ export function usePrinter() {
     // 2D Layer Visualizer
     activeGcodeLines,
     currentPrintIndex,
-    setPreviewGcode
+    setPreviewGcode,
+    // "Save My Print" (Crash Recovery)
+    interruptedJob,
+    resumeInterruptedPrint,
+    discardInterruptedPrint,
+    // Smart Park & Anti-Ooze
+    smartPark,
+    setSmartPark
   };
 }

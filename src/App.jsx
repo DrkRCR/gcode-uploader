@@ -188,6 +188,11 @@ function App() {
               previewBrowserMelody={printer.previewBrowserMelody}
               melodies={printer.melodies}
               setPreviewGcode={printer.setPreviewGcode}
+              interruptedJob={printer.interruptedJob}
+              resumeInterruptedPrint={printer.resumeInterruptedPrint}
+              discardInterruptedPrint={printer.discardInterruptedPrint}
+              smartPark={printer.smartPark}
+              setSmartPark={printer.setSmartPark}
             />
           )}
           {printer.isConnected && (

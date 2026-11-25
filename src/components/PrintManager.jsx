@@ -1,10 +1,12 @@
 import { useState } from 'react';
 import { 
   Upload, Play, Pause, Square, AlertTriangle, CheckCircle, Clock, X, 
-  Palette, Bell, Volume2, ArrowUpFromLine, ArrowDownToLine, Layers, Music
+  Palette, Bell, Volume2, ArrowUpFromLine, ArrowDownToLine, Layers, Music,
+  Sliders, ShieldAlert, Trash2
 } from 'lucide-react';
 import { analyzeGcode } from '../lib/gcodeAnalyzer';
 import { getProfileById } from '../lib/printers';
+import GcodeTweakerModal from './GcodeTweakerModal';
 
 export default function PrintManager({ 
   isPrinting, printProgress, startPrint, pausePrint, resumePrint, stopPrint, 
@@ -17,7 +19,10 @@ export default function PrintManager({
   beepOnFilament, setBeepOnFilament,
   soundAlertFilament, setSoundAlertFilament,
   selectedMelody, setSelectedMelody, playMelody, melodies,
-  setPreviewGcode
+  setPreviewGcode,
+  // Save My Print (Recovery) & Smart Park props
+  interruptedJob, resumeInterruptedPrint, discardInterruptedPrint,
+  smartPark, setSmartPark
 }) {
   const [file, setFile] = useState(null);
   const [gcodeContent, setGcodeContent] = useState('');
@@ -27,6 +32,15 @@ export default function PrintManager({
   const [showPreflight, setShowPreflight] = useState(false);
   const [copies, setCopies] = useState(1);
   const [showChangesList, setShowChangesList] = useState(false);
+  const [showTweakerModal, setShowTweakerModal] = useState(false);
+
+  const handleApplyTweaks = (updatedGcode) => {
+    setGcodeContent(updatedGcode);
+    setPreviewGcode?.(updatedGcode);
+    const result = analyzeGcode(updatedGcode);
+    setAnalysis(result);
+    validateGcode(result, activeProfileId);
+  };
 
   const handleFileChange = (e) => {
     const selected = e.target.files[0];
@@ -95,7 +109,7 @@ export default function PrintManager({
   const handleStart = () => {
     setShowPreflight(false);
     if (gcodeContent) {
-      startPrint(gcodeContent, copies, analysis?.estimatedTimeSeconds, analysis?.filamentChanges || []);
+      startPrint(gcodeContent, copies, analysis?.estimatedTimeSeconds, analysis?.filamentChanges || [], file?.name || 'model.gcode');
     }
   };
   
@@ -114,6 +128,91 @@ export default function PrintManager({
     <div className="panel print-panel">
       <h2>Print Manager {totalCopies > 1 && !showPreflight && `(Copy ${completedCopies + 1} of ${totalCopies})`}</h2>
       
+      {/* Save My Print Crash Recovery Banner */}
+      {interruptedJob && !isPrinting && (
+        <div className="recovery-banner" style={{
+          padding: '1rem',
+          background: 'linear-gradient(135deg, rgba(239, 68, 68, 0.2), rgba(185, 28, 28, 0.1))',
+          border: '2px solid #ef4444',
+          borderRadius: '10px',
+          marginBottom: '1rem',
+          boxShadow: '0 0 20px rgba(239, 68, 68, 0.3)'
+        }}>
+          <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.6rem'}}>
+            <div style={{display: 'flex', alignItems: 'center', gap: '0.6rem'}}>
+              <ShieldAlert size={22} color="#ef4444" />
+              <h3 style={{margin: 0, color: '#ef4444', fontSize: '1.05rem', fontWeight: 'bold'}}>
+                Interrupted Print Detected!
+              </h3>
+            </div>
+            <span style={{
+              background: 'rgba(239, 68, 68, 0.2)', 
+              color: '#fca5a5', 
+              padding: '0.2rem 0.5rem', 
+              borderRadius: '999px', 
+              fontSize: '0.75rem', 
+              fontWeight: 'bold',
+              border: '1px solid #ef4444'
+            }}>
+              Save My Print
+            </span>
+          </div>
+
+          <p style={{fontSize: '0.85rem', color: 'var(--text-muted)', margin: '0.4rem 0'}}>
+            A previous print was stopped unexpectedly (disconnect/power cut). You can safely resume from the exact layer without crashing the nozzle into your printed part!
+          </p>
+
+          <div style={{
+            background: 'rgba(0,0,0,0.3)', 
+            padding: '0.6rem', 
+            borderRadius: '6px', 
+            fontSize: '0.8rem', 
+            margin: '0.6rem 0',
+            fontFamily: 'monospace'
+          }}>
+            <div><strong>File:</strong> {interruptedJob.fileName || 'Unknown File'}</div>
+            <div><strong>Progress:</strong> {interruptedJob.progress?.toFixed(1) || 0}% (Line {interruptedJob.lastIndex} of {interruptedJob.totalLines})</div>
+            <div><strong>Last Z-Height:</strong> {interruptedJob.lastZ ? `${interruptedJob.lastZ.toFixed(2)}mm` : 'Unknown'}</div>
+          </div>
+
+          <div style={{display: 'flex', gap: '0.6rem', marginTop: '0.6rem'}}>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={resumeInterruptedPrint}
+              style={{
+                flex: 2, 
+                padding: '0.6rem 1rem', 
+                background: 'linear-gradient(90deg, #10b981, #059669)',
+                fontWeight: 'bold',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '0.4rem'
+              }}
+            >
+              <Play size={16} /> Resume from Z={interruptedJob.lastZ ? interruptedJob.lastZ.toFixed(2) : '?'}mm
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={discardInterruptedPrint}
+              style={{
+                flex: 1, 
+                padding: '0.6rem',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '0.4rem',
+                color: '#f87171'
+              }}
+            >
+              <Trash2 size={16} /> Discard
+            </button>
+          </div>
+        </div>
+      )}
+
       {showPreflight && analysis ? (
         <div className="preflight-modal">
           <div className="preflight-header">
@@ -128,16 +227,40 @@ export default function PrintManager({
             <p><strong>Dimensions:</strong> {analysis.bounds.x}x{analysis.bounds.y}x{analysis.bounds.z}mm</p>
             <p><strong>Peak Temps:</strong> H:{analysis.temps.hotend}°C / B:{analysis.temps.bed}°C</p>
             
-            <div style={{marginTop: '0.8rem', display: 'flex', alignItems: 'center', gap: '1rem'}}>
-              <strong>Sequence Copies:</strong>
-              <input 
-                type="number" 
-                min="1" 
-                max="99" 
-                value={copies} 
-                onChange={(e) => setCopies(parseInt(e.target.value) || 1)} 
-                style={{width: '60px', padding: '0.3rem', borderRadius: '4px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text-main)'}} 
-              />
+            <div style={{marginTop: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem'}}>
+              <div style={{display: 'flex', alignItems: 'center', gap: '0.8rem'}}>
+                <strong>Sequence Copies:</strong>
+                <input 
+                  type="number" 
+                  min="1" 
+                  max="99" 
+                  value={copies} 
+                  onChange={(e) => setCopies(parseInt(e.target.value) || 1)} 
+                  style={{width: '60px', padding: '0.3rem', borderRadius: '4px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text-main)'}} 
+                />
+              </div>
+
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setShowTweakerModal(true)}
+                style={{fontSize: '0.8rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem', borderColor: '#818cf8', color: '#c7d2fe'}}
+                title="Inject pauses, change temperatures, or edit G-code directly in your browser"
+              >
+                <Sliders size={14} color="#818cf8" /> Quick Tweaker
+              </button>
+            </div>
+
+            {/* Smart Park & Anti-Ooze Settings */}
+            <div style={{marginTop: '0.8rem', padding: '0.6rem 0.8rem', background: 'rgba(255,255,255,0.03)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.07)'}}>
+              <label style={{display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.85rem'}}>
+                <input 
+                  type="checkbox" 
+                  checked={smartPark} 
+                  onChange={(e) => setSmartPark?.(e.target.checked)} 
+                />
+                <span><strong>Smart Park & Anti-Ooze:</strong> Lift +3mm, retract 2mm, park at corner (X10 Y10) on pause</span>
+              </label>
             </div>
 
             {/* Multi-Filament & Color Change Detection Banner */}
@@ -446,6 +569,15 @@ export default function PrintManager({
           </div>
         </div>
       )}
+
+      {/* Quick Tweaker Modal */}
+      <GcodeTweakerModal
+        isOpen={showTweakerModal}
+        onClose={() => setShowTweakerModal(false)}
+        gcodeContent={gcodeContent}
+        fileName={file?.name}
+        onApplyChanges={handleApplyTweaks}
+      />
     </div>
   );
 }
