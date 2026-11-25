@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Temporary patches
+pending_fixes/
+apply_fixes.ps1

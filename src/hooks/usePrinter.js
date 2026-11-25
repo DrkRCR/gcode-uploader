@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { PrinterConnection } from '../lib/serial';
 import { getProfileById } from '../lib/printers';
+import { sendPrinterBeep, triggerFilamentChangeAlert, playBrowserTone, playPrinterMelody, playBrowserMelody, MELODIES } from '../lib/beeper';
+import { dispatchPrintNotification } from '../lib/notifications';
 
 export function usePrinter() {
   const [isConnected, setIsConnected] = useState(false);
@@ -23,7 +25,41 @@ export function usePrinter() {
   const [totalCopies, setTotalCopies] = useState(1);
   const [completedCopies, setCompletedCopies] = useState(0);
   const [isWaitingForClear, setIsWaitingForClear] = useState(false);
-  
+
+  // Multi-Filament & Beeper Control State
+  const [isFilamentChangePause, setIsFilamentChangePause] = useState(false);
+  const isFilamentChangePauseRef = useRef(false);
+  const [currentFilamentChange, setCurrentFilamentChange] = useState(null);
+  const [filamentChangesList, setFilamentChangesList] = useState([]);
+  const filamentChangesListRef = useRef([]);
+  const currentChangeIndexRef = useRef(0);
+
+  const [autoPauseFilament, setAutoPauseFilament] = useState(true);
+  const autoPauseFilamentRef = useRef(true);
+  const [beepOnFilament, setBeepOnFilament] = useState(true);
+  const beepOnFilamentRef = useRef(true);
+  const [soundAlertFilament, setSoundAlertFilament] = useState(true);
+  const soundAlertFilamentRef = useRef(true);
+
+  // Selected Song Melody for Filament Changes
+  const [selectedMelody, setSelectedMelodyState] = useState(() => {
+    return (typeof window !== 'undefined' && localStorage.getItem('filamentMelody')) || 'cheques';
+  });
+  const selectedMelodyRef = useRef(selectedMelody);
+
+  const setSelectedMelody = useCallback((key) => {
+    setSelectedMelodyState(key);
+    selectedMelodyRef.current = key;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('filamentMelody', key);
+    }
+  }, []);
+
+  // Sync refs with state
+  useEffect(() => { autoPauseFilamentRef.current = autoPauseFilament; }, [autoPauseFilament]);
+  useEffect(() => { beepOnFilamentRef.current = beepOnFilament; }, [beepOnFilament]);
+  useEffect(() => { soundAlertFilamentRef.current = soundAlertFilament; }, [soundAlertFilament]);
+
   const setIsPrinting = useCallback((val) => {
     isPrintingRef.current = val;
     setIsPrintingState(val);
@@ -36,9 +72,20 @@ export function usePrinter() {
   const isWaitingForOkRef = useRef(false);
   const pollIntervalRef = useRef(null);
   
-  // For file printing
+  // For file printing & 2D Layer Visualizer
   const gcodeLinesRef = useRef([]);
   const printIndexRef = useRef(0);
+  const [activeGcodeLines, setActiveGcodeLines] = useState([]);
+  const [currentPrintIndex, setCurrentPrintIndex] = useState(0);
+
+  const setPreviewGcode = useCallback((gcodeString) => {
+    if (!gcodeString) {
+      setActiveGcodeLines([]);
+      return;
+    }
+    const lines = typeof gcodeString === 'string' ? gcodeString.split('\n') : gcodeString;
+    setActiveGcodeLines(lines);
+  }, []);
 
   const addLog = useCallback((log) => {
     setTerminalLogs(prev => [...prev.slice(-99), log]);
@@ -58,6 +105,7 @@ export function usePrinter() {
     if (isPrintingRef.current) {
       while (printIndexRef.current < gcodeLinesRef.current.length) {
         let cmd = gcodeLinesRef.current[printIndexRef.current].trim();
+        const currentLineIndex = printIndexRef.current;
         printIndexRef.current++;
         
         // Strip inline comments
@@ -70,9 +118,59 @@ export function usePrinter() {
           continue;
         }
 
+        // Check for Filament Change / Pause triggers
+        const upperCmd = cmd.toUpperCase();
+        const isPauseCmd = upperCmd === 'M600' || upperCmd.startsWith('M600 ') ||
+                           upperCmd === 'M0' || upperCmd.startsWith('M0 ') ||
+                           upperCmd === 'M1' || upperCmd.startsWith('M1 ') ||
+                           upperCmd === 'M25' || upperCmd === 'PAUSE';
+
+        const registeredChange = filamentChangesListRef.current?.find(
+          c => Math.abs(c.lineIndex - currentLineIndex) <= 1
+        );
+
+        if ((isPauseCmd || registeredChange) && autoPauseFilamentRef.current) {
+          const changeInfo = registeredChange || {
+            id: currentChangeIndexRef.current + 1,
+            description: `Filament change at line ${currentLineIndex + 1}`,
+            command: cmd,
+            layer: 'N/A',
+            z: 'N/A'
+          };
+
+          currentChangeIndexRef.current++;
+          isFilamentChangePauseRef.current = true;
+          setIsFilamentChangePause(true);
+          setCurrentFilamentChange(changeInfo);
+          setIsPrinting(false);
+
+          addLog(`[FILAMENT CHANGE] Paused: ${changeInfo.description || cmd}. Swap filament & click Resume.`);
+
+          // Trigger Beeper & Audio notification with selected song melody
+          if (beepOnFilamentRef.current || soundAlertFilamentRef.current) {
+            triggerFilamentChangeAlert(
+              beepOnFilamentRef.current ? (c) => connectionRef.current?.write(c) : null,
+              { 
+                melodyKey: selectedMelodyRef.current,
+                printerBeeper: beepOnFilamentRef.current,
+                browserSound: soundAlertFilamentRef.current 
+              }
+            );
+          }
+
+          // Trigger Mobile Push & Webhook (Discord / Telegram) notification
+          dispatchPrintNotification('filament_change', {
+            z: changeInfo.z,
+            layer: changeInfo.layer
+          });
+
+          return;
+        }
+
         // Throttle React state updates (UI) to every 100 lines to save power
         if (printIndexRef.current % 100 === 0) {
           setPrintProgress((printIndexRef.current / gcodeLinesRef.current.length) * 100);
+          setCurrentPrintIndex(printIndexRef.current);
           
           if (printStartTimeRef.current) {
             let msRemaining = 0;
@@ -96,7 +194,6 @@ export function usePrinter() {
         }
         
         isWaitingForOkRef.current = true;
-        // Don't add log for every line of file to save CPU
         await connectionRef.current.write(cmd);
         return;
       }
@@ -105,6 +202,11 @@ export function usePrinter() {
       if (printIndexRef.current >= gcodeLinesRef.current.length) {
         addLog(`--- Copy ${completedCopiesRef.current + 1} Complete ---`);
         
+        // Dispatch mobile push / webhook notification
+        dispatchPrintNotification('print_complete', {
+          fileName: `Print Copy ${completedCopiesRef.current + 1}`
+        });
+
         completedCopiesRef.current++;
         setCompletedCopies(completedCopiesRef.current);
 
@@ -126,6 +228,9 @@ export function usePrinter() {
         setTotalCopies(1);
         setCompletedCopies(0);
         setIsWaitingForClear(false);
+        setIsFilamentChangePause(false);
+        setCurrentFilamentChange(null);
+        setFilamentChangesList([]);
       }
     }
   }, [addLog, setIsPrinting]);
@@ -161,6 +266,28 @@ export function usePrinter() {
     processQueue();
   }, [processQueue]);
 
+  // Beeper triggers
+  const beepPrinter = useCallback((freq = 1000, duration = 200) => {
+    sendPrinterBeep(sendCommand, freq, duration);
+    playBrowserTone(freq, duration / 1000);
+  }, [sendCommand]);
+
+  const alertBeeper = useCallback((browserSound = true) => {
+    triggerFilamentChangeAlert(sendCommand, { 
+      melodyKey: selectedMelodyRef.current,
+      printerBeeper: true,
+      browserSound 
+    });
+  }, [sendCommand]);
+
+  const playMelody = useCallback((melodyKey = selectedMelodyRef.current) => {
+    playPrinterMelody(sendCommand, melodyKey, true);
+  }, [sendCommand]);
+
+  const previewBrowserMelody = useCallback((melodyKey = selectedMelodyRef.current) => {
+    playBrowserMelody(melodyKey);
+  }, []);
+
   const connect = async (baudRate) => {
     const conn = new PrinterConnection(handleData, () => {
       setIsConnected(false);
@@ -176,8 +303,6 @@ export function usePrinter() {
       // Start temperature polling
       sendCommand("M105");
       pollIntervalRef.current = setInterval(() => {
-        // Only push M105 if we aren't printing rapidly to avoid clogging
-        // Actually, queueing M105 is fine.
         sendCommand("M105");
       }, 5000); 
     }
@@ -196,24 +321,35 @@ export function usePrinter() {
   // For ETA
   const totalPrintSecondsRef = useRef(null);
 
-  const startPrint = (gcodeString, copies = 1, estimatedTimeSeconds = null) => {
-    const lines = gcodeString.split('\n');
+  const startPrint = (gcodeString, copies = 1, estimatedTimeSeconds = null, detectedChanges = []) => {
+    const lines = typeof gcodeString === 'string' ? gcodeString.split('\n') : gcodeString;
     gcodeLinesRef.current = lines;
+    setActiveGcodeLines(lines);
     printIndexRef.current = 0;
+    setCurrentPrintIndex(0);
     printStartTimeRef.current = Date.now();
     totalCopiesRef.current = copies;
     completedCopiesRef.current = 0;
     totalPrintSecondsRef.current = estimatedTimeSeconds;
+    
+    // Filament changes initialization
+    filamentChangesListRef.current = detectedChanges || [];
+    setFilamentChangesList(detectedChanges || []);
+    currentChangeIndexRef.current = 0;
+    setIsFilamentChangePause(false);
+    setCurrentFilamentChange(null);
+
     setTotalCopies(copies);
     setCompletedCopies(0);
     setIsWaitingForClear(false);
     setLiveEta(estimatedTimeSeconds ? "Calculating..." : "Calculating (Naive)...");
     setIsPrinting(true);
     setPrintProgress(0);
+
     // Kickoff process queue
     setTimeout(() => {
-        isWaitingForOkRef.current = false;
-        processQueue();
+      isWaitingForOkRef.current = false;
+      processQueue();
     }, 100);
   };
   
@@ -225,8 +361,8 @@ export function usePrinter() {
     setIsPrinting(true);
     setPrintProgress(0);
     setTimeout(() => {
-        isWaitingForOkRef.current = false;
-        processQueue();
+      isWaitingForOkRef.current = false;
+      processQueue();
     }, 100);
   };
 
@@ -236,16 +372,43 @@ export function usePrinter() {
 
   const resumePrint = () => {
     setIsPrinting(true);
-    // ensure queue restarts
     setTimeout(() => {
-        processQueue();
+      processQueue();
     }, 100);
+  };
+
+  const resumeFilamentChange = () => {
+    setIsFilamentChangePause(false);
+    isFilamentChangePauseRef.current = false;
+    setCurrentFilamentChange(null);
+    addLog("--- Resuming Print after Filament Change ---");
+    setIsPrinting(true);
+    setTimeout(() => {
+      isWaitingForOkRef.current = false;
+      processQueue();
+    }, 100);
+  };
+
+  const unloadFilament = (length = 50) => {
+    sendCommand('G91');
+    sendCommand(`G1 E-${length} F600`);
+    sendCommand('G90');
+    addLog(`> Retracted ${length}mm filament`);
+  };
+
+  const purgeFilament = (length = 30) => {
+    sendCommand('G91');
+    sendCommand(`G1 E${length} F200`);
+    sendCommand('G90');
+    addLog(`> Purged ${length}mm new filament`);
   };
 
   const stopPrint = () => {
     setIsPrinting(false);
     gcodeLinesRef.current = [];
+    setActiveGcodeLines([]);
     printIndexRef.current = 0;
+    setCurrentPrintIndex(0);
     setPrintProgress(0);
     setLiveEta(null);
     printStartTimeRef.current = null;
@@ -254,6 +417,9 @@ export function usePrinter() {
     setTotalCopies(1);
     setCompletedCopies(0);
     setIsWaitingForClear(false);
+    setIsFilamentChangePause(false);
+    setCurrentFilamentChange(null);
+    setFilamentChangesList([]);
   };
 
   const [elapsedTimeStr, setElapsedTimeStr] = useState(null);
@@ -299,6 +465,30 @@ export function usePrinter() {
     continueNextCopy,
     totalCopies,
     completedCopies,
-    isWaitingForClear
+    isWaitingForClear,
+    // Filament & Beeper controls
+    isFilamentChangePause,
+    currentFilamentChange,
+    filamentChangesList,
+    autoPauseFilament,
+    setAutoPauseFilament,
+    beepOnFilament,
+    setBeepOnFilament,
+    soundAlertFilament,
+    setSoundAlertFilament,
+    resumeFilamentChange,
+    unloadFilament,
+    purgeFilament,
+    beepPrinter,
+    alertBeeper,
+    selectedMelody,
+    setSelectedMelody,
+    playMelody,
+    previewBrowserMelody,
+    melodies: MELODIES,
+    // 2D Layer Visualizer
+    activeGcodeLines,
+    currentPrintIndex,
+    setPreviewGcode
   };
 }

@@ -10,12 +10,19 @@ import Terminal from './components/Terminal';
 import FanControl from './components/FanControl';
 import ExtruderControl from './components/ExtruderControl';
 import Macros from './components/Macros';
-import './App.css'; // Just in case, keeping it empty
+import BedMeshVisualizer from './components/BedMeshVisualizer';
+import GcodeVisualizer from './components/GcodeVisualizer';
+import NotificationModal from './components/NotificationModal';
+import { getProfileById } from './lib/printers';
+import { Bell, Eye, Terminal as TerminalIcon } from 'lucide-react';
+import './App.css';
 
 function App() {
   const printer = usePrinter();
   const wakeLock = useWakeLock();
   const [powerSaver, setPowerSaver] = useState(false);
+  const [showNotificationsModal, setShowNotificationsModal] = useState(false);
+  const [rightColTab, setRightColTab] = useState('visualizer');
 
   // Auto-acquire wake lock when printing starts
   useEffect(() => {
@@ -39,52 +46,74 @@ function App() {
             {printer.isConnected ? 'Connected' : 'Disconnected'}
           </div>
         </div>
-        {printer.isConnected ? (
-          <div style={{display: 'flex', gap: '1rem', alignItems: 'center'}}>
-            <button 
-              className="btn-primary" 
-              onClick={() => { printer.sendCommand('M104 S0'); printer.sendCommand('M140 S0'); printer.sendCommand('M106 S0'); }} 
-              style={{padding: '0.5rem 1.5rem', fontWeight: 'bold', fontSize: '1rem', letterSpacing: '1px', textTransform: 'uppercase'}}
-            >
-              Cooldown
-            </button>
-            <button 
-              className="btn-danger e-stop" 
-              onClick={() => {
-                if (window.confirm("Are you sure you want to trigger an EMERGENCY STOP? This will immediately halt the printer and kill all commands.")) {
-                  printer.sendCommand('M112');
-                }
-              }} 
-              style={{padding: '0.5rem 1.5rem', fontWeight: 'bold', fontSize: '1rem', letterSpacing: '1px', boxShadow: '0 0 15px rgba(255,0,0,0.5)', border: '2px solid #ff4b4b', textTransform: 'uppercase'}}
-            >
-              Emergency Stop
-            </button>
-          </div>
-        ) : (
-          <div style={{display: 'flex', gap: '1rem', alignItems: 'center'}}>
-            <button 
-              className="btn-secondary"
-              onClick={() => setPowerSaver(true)}
-              style={{padding: '0.5rem 1rem', fontSize: '0.8rem', opacity: 0.8, border: '1px solid #94a3b8'}}
-            >
-              OLED Power Saver
-            </button>
-            <button 
-              className="btn-secondary"
-              onClick={async () => {
-                try {
-                  const device = await navigator.usb.requestDevice({ filters: [] });
-                  alert(`USB DETECTED: Vendor 0x${device.vendorId.toString(16)} | Product 0x${device.productId.toString(16)} | Class ${device.deviceClass}`);
-                } catch (e) {
-                  alert("USB Debug failed or canceled: " + e.message);
-                }
-              }}
-              style={{padding: '0.5rem 1rem', fontSize: '0.8rem', opacity: 0.7}}
-            >
-              Debug USB
-            </button>
-          </div>
-        )}
+
+        <div style={{display: 'flex', gap: '0.8rem', alignItems: 'center'}}>
+          {/* Notification & Webhooks Config Button */}
+          <button 
+            type="button"
+            className="btn-secondary" 
+            onClick={() => setShowNotificationsModal(true)} 
+            style={{padding: '0.5rem 0.9rem', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem'}}
+            title="Mobile Push & Webhook Notification Settings"
+          >
+            <Bell size={16} color="#a5b4fc" /> Alerts
+          </button>
+
+          {printer.isConnected ? (
+            <>
+              <button 
+                className="btn-secondary"
+                onClick={() => printer.beepPrinter(1000, 200)}
+                style={{padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', gap: '0.4rem'}}
+                title="Test printer buzzer (M300)"
+              >
+                <Bell size={16} color="#fbc531" /> Beep
+              </button>
+              <button 
+                className="btn-primary" 
+                onClick={() => { printer.sendCommand('M104 S0'); printer.sendCommand('M140 S0'); printer.sendCommand('M106 S0'); }} 
+                style={{padding: '0.5rem 1.5rem', fontWeight: 'bold', fontSize: '1rem', letterSpacing: '1px', textTransform: 'uppercase'}}
+              >
+                Cooldown
+              </button>
+              <button 
+                className="btn-danger e-stop" 
+                onClick={() => {
+                  if (window.confirm("Are you sure you want to trigger an EMERGENCY STOP? This will immediately halt the printer and kill all commands.")) {
+                    printer.sendCommand('M112');
+                  }
+                }} 
+                style={{padding: '0.5rem 1.5rem', fontWeight: 'bold', fontSize: '1rem', letterSpacing: '1px', boxShadow: '0 0 15px rgba(255,0,0,0.5)', border: '2px solid #ff4b4b', textTransform: 'uppercase'}}
+              >
+                Emergency Stop
+              </button>
+            </>
+          ) : (
+            <>
+              <button 
+                className="btn-secondary"
+                onClick={() => setPowerSaver(true)}
+                style={{padding: '0.5rem 1rem', fontSize: '0.8rem', opacity: 0.8, border: '1px solid #94a3b8'}}
+              >
+                OLED Power Saver
+              </button>
+              <button 
+                className="btn-secondary"
+                onClick={async () => {
+                  try {
+                    const device = await navigator.usb.requestDevice({ filters: [] });
+                    alert(`USB DETECTED: Vendor 0x${device.vendorId.toString(16)} | Product 0x${device.productId.toString(16)} | Class ${device.deviceClass}`);
+                  } catch (e) {
+                    alert("USB Debug failed or canceled: " + e.message);
+                  }
+                }}
+                style={{padding: '0.5rem 1rem', fontSize: '0.8rem', opacity: 0.7}}
+              >
+                Debug USB
+              </button>
+            </>
+          )}
+        </div>
       </header>
       
       {powerSaver && (
@@ -108,6 +137,12 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* Mobile & Webhook Notifications Modal */}
+      <NotificationModal 
+        isOpen={showNotificationsModal} 
+        onClose={() => setShowNotificationsModal(false)} 
+      />
 
       <main className="dashboard">
         <div className="column left-col">
@@ -134,6 +169,25 @@ function App() {
               completedCopies={printer.completedCopies}
               isWaitingForClear={printer.isWaitingForClear}
               continueNextCopy={printer.continueNextCopy}
+              isFilamentChangePause={printer.isFilamentChangePause}
+              currentFilamentChange={printer.currentFilamentChange}
+              resumeFilamentChange={printer.resumeFilamentChange}
+              unloadFilament={printer.unloadFilament}
+              purgeFilament={printer.purgeFilament}
+              beepPrinter={printer.beepPrinter}
+              alertBeeper={printer.alertBeeper}
+              autoPauseFilament={printer.autoPauseFilament}
+              setAutoPauseFilament={printer.setAutoPauseFilament}
+              beepOnFilament={printer.beepOnFilament}
+              setBeepOnFilament={printer.setBeepOnFilament}
+              soundAlertFilament={printer.soundAlertFilament}
+              setSoundAlertFilament={printer.setSoundAlertFilament}
+              selectedMelody={printer.selectedMelody}
+              setSelectedMelody={printer.setSelectedMelody}
+              playMelody={printer.playMelody}
+              previewBrowserMelody={printer.previewBrowserMelody}
+              melodies={printer.melodies}
+              setPreviewGcode={printer.setPreviewGcode}
             />
           )}
           {printer.isConnected && (
@@ -156,7 +210,17 @@ function App() {
               <MovementControl sendCommand={printer.sendCommand} />
               <ExtruderControl sendCommand={printer.sendCommand} />
               <FanControl sendCommand={printer.sendCommand} />
-              <Macros sendCommand={printer.sendCommand} />
+              <Macros 
+                sendCommand={printer.sendCommand} 
+                selectedMelody={printer.selectedMelody}
+                setSelectedMelody={printer.setSelectedMelody}
+                playMelody={printer.playMelody}
+                melodies={printer.melodies}
+              />
+              <BedMeshVisualizer 
+                terminalLogs={printer.terminalLogs} 
+                sendCommand={printer.sendCommand} 
+              />
             </>
           ) : (
             <div className="placeholder-panel panel">
@@ -166,7 +230,36 @@ function App() {
         </div>
 
         <div className="column right-col">
-          <Terminal logs={printer.terminalLogs} sendCommand={printer.sendCommand} />
+          {/* Tab Bar for Visualizer vs Terminal */}
+          <div style={{display: 'flex', gap: '0.5rem', background: 'rgba(0,0,0,0.3)', padding: '0.3rem', borderRadius: '10px'}}>
+            <button 
+              type="button"
+              className={rightColTab === 'visualizer' ? 'btn-primary' : 'btn-secondary'} 
+              onClick={() => setRightColTab('visualizer')}
+              style={{flex: 1, fontSize: '0.85rem', padding: '0.45rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem'}}
+            >
+              <Eye size={15} /> 2D Layer Visualizer
+            </button>
+            <button 
+              type="button"
+              className={rightColTab === 'terminal' ? 'btn-primary' : 'btn-secondary'} 
+              onClick={() => setRightColTab('terminal')}
+              style={{flex: 1, fontSize: '0.85rem', padding: '0.45rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem'}}
+            >
+              <TerminalIcon size={15} /> Terminal Console
+            </button>
+          </div>
+
+          {rightColTab === 'visualizer' ? (
+            <GcodeVisualizer 
+              gcodeLines={printer.activeGcodeLines}
+              printIndex={printer.currentPrintIndex}
+              isPrinting={printer.isPrinting}
+              bedSize={getProfileById(printer.activeProfileId).volume}
+            />
+          ) : (
+            <Terminal logs={printer.terminalLogs} sendCommand={printer.sendCommand} />
+          )}
         </div>
       </main>
     </div>

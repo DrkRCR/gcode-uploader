@@ -378,3 +378,33 @@ select:focus, input:focus { border-color: var(--accent-blue); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+/* Multi-Filament & Beeper Styles */
+.filament-detection-card {
+  transition: all 0.2s ease;
+}
+
+.filament-change-modal {
+  animation: filamentPulse 2.5s infinite alternate ease-in-out;
+}
+
+@keyframes filamentPulse {
+  0% {
+    box-shadow: 0 0 15px rgba(245, 158, 11, 0.2);
+    border-color: #f59e0b;
+  }
+  100% {
+    box-shadow: 0 0 30px rgba(245, 158, 11, 0.45);
+    border-color: #fbbf24;
+  }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.spin-icon {
+  animation: spin 1s linear infinite;
+}
+
+
